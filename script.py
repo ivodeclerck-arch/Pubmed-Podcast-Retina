@@ -150,8 +150,6 @@ TOPICS = {
           'OR "Epiretinal Membrane"[MeSH] '
           'OR "Retinal Perforations"[MeSH] '
           'OR "macular hole"[tiab] '
-          'OR "surgical workflow"[tiab] '
-          'OR "intraoperative"[tiab] '
           'OR "Eye Neoplasms"[MeSH] '
           'OR "Uveal Melanoma"[MeSH] '
           'OR "uveal melanoma"[tiab] '
@@ -168,7 +166,7 @@ TOPICS = {
 }
 
 DAYS_BACK             = 7
-MAX_PAPERS_PER_TOPIC  = 40
+MAX_PAPERS_PER_TOPIC  = 25
 GROQ_MODEL            = "meta-llama/llama-4-scout-17b-16e-instruct"
 SECONDS_BETWEEN_CALLS = 2
 WORDS_ABSTRACT_ONLY   = 300
@@ -220,8 +218,22 @@ def _ncbi_get(endpoint, params, timeout=60, retries=4):
 
 # ---------- PubMed ----------
 
+# Publication types excluded from every topic search. Edit to taste.
+#   "Case Reports"[pt]  — individual patient case write-ups
+#   "Comment"[pt]       — editorial commentary on another article
+#   "Editorial"[pt]     — editorials / opinion pieces
+#   "Letter"[pt]        — letters to the editor (often comments; uncomment to also drop)
+EXCLUDED_PUB_TYPES = (
+    '"Case Reports"[pt] '
+    'OR "Comment"[pt] '
+    'OR "Editorial"[pt]'
+    # ' OR "Letter"[pt]'   # uncomment if you also want letters excluded
+)
+
+
 def search_pubmed(query, days_back, max_results):
-    params = {"db": "pubmed", "term": query, "retmax": max_results,
+    full_query = f"({query}) NOT ({EXCLUDED_PUB_TYPES})"
+    params = {"db": "pubmed", "term": full_query, "retmax": max_results,
               "retmode": "json", "reldate": days_back,
               "datetype": "pdat", "sort": "date"}
     r = _ncbi_get("esearch.fcgi", params, timeout=30)
@@ -585,10 +597,15 @@ else:
 
 print("\n[1/5] Searching PubMed...")
 all_papers = {}
+seen_pmids = set()       # tracks PMIDs already assigned to an earlier topic
 for topic, query in TOPICS.items():
     pmids = search_pubmed(query, DAYS_BACK, MAX_PAPERS_PER_TOPIC)
-    all_papers[topic] = fetch_abstracts(pmids)
-    print(f"  {topic}: {len(all_papers[topic])} papers")
+    unique = [p for p in pmids if p not in seen_pmids]
+    dups = len(pmids) - len(unique)
+    seen_pmids.update(unique)
+    all_papers[topic] = fetch_abstracts(unique)
+    dup_note = f"  ({dups} duplicate{'s' if dups != 1 else ''} skipped)" if dups else ""
+    print(f"  {topic}: {len(all_papers[topic])} papers{dup_note}")
 total = sum(len(p) for p in all_papers.values())
 
 print("\n[2/5] Fetching open-access full text from PMC...")
