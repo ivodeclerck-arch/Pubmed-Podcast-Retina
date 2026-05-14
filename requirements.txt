@@ -1,0 +1,5 @@
+groq
+edge-tts
+nest_asyncio
+requests
+mutagen
