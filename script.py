@@ -218,15 +218,27 @@ def _ncbi_get(endpoint, params, timeout=60, retries=4):
 
 # ---------- PubMed ----------
 
-# Publication types excluded from every topic search. Edit to taste.
-#   "Case Reports"[pt]  — individual patient case write-ups
-#   "Comment"[pt]       — editorial commentary on another article
-#   "Editorial"[pt]     — editorials / opinion pieces
-#   "Letter"[pt]        — letters to the editor (often comments; uncomment to also drop)
+# Publication-type exclusions, applied to every search.
+#
+# The [pt] filter only works after NCBI indexing completes (often 1-7 days
+# after publication). Since our 7-day window catches papers that may not yet
+# be indexed, we add title-based fallbacks that catch un-indexed papers by
+# their title text — commentary and case reports follow predictable patterns.
 EXCLUDED_PUB_TYPES = (
+    # Indexed publication-type filters
     '"Case Reports"[pt] '
     'OR "Comment"[pt] '
-    'OR "Editorial"[pt]'
+    'OR "Editorial"[pt] '
+    'OR "Published Erratum"[pt] '
+    # Title-based fallbacks for papers NCBI hasn't indexed yet
+    'OR "case report"[ti] '
+    'OR "case series"[ti] '
+    'OR "comment on"[ti] '
+    'OR "in reply"[ti] '
+    'OR "reply to"[ti] '
+    'OR "letter to the editor"[ti] '
+    'OR "author response"[ti] '
+    'OR "erratum"[ti]'
     # ' OR "Letter"[pt]'   # uncomment if you also want letters excluded
 )
 
