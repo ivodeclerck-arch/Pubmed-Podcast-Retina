@@ -1,13 +1,9 @@
 """
-PubMed Weekly Digest — v5
-==========================
-- Refined PubMed queries with MeSH hierarchies
-- Per-paper spoken summaries (PhD-level, scientific, no filler)
-- Variable length: ~300 words from abstract, 400–500 from full text
-- HTML email with all titles + abstracts grouped by topic
-- ID3 chapter markers in MP3 for skip-forward in podcast apps
-- RSS feed for Apple Podcasts subscription
-- Runs unattended on GitHub Actions
+PubMed Weekly Digest — v5.1
+============================
+Same as v5 plus:
+- NCBI rate limiter to stay under 3/sec (or 10/sec if NCBI_API_KEY set)
+- Automatic retry on 429 Too Many Requests
 """
 
 import os
@@ -37,6 +33,7 @@ nest_asyncio.apply()
 # ===================================================================
 
 GROQ_API_KEY        = os.environ.get("GROQ_API_KEY", "PASTE_FOR_LOCAL_TESTING")
+NCBI_API_KEY        = os.environ.get("NCBI_API_KEY", "")   # optional but recommended
 GMAIL_USER          = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_TO            = os.environ.get("EMAIL_TO", "")
@@ -54,10 +51,6 @@ PODCAST_DESCRIPTION = ("Weekly research updates in ocular oncology (excluding re
                        "vitreoretinal surgery, ophthalmic surgical robotics, and AI applications "
                        "in vitreoretinal surgery and ocular oncology.")
 PODCAST_AUTHOR      = "Ivo De Clerck"
-
-# --- Search topics ---
-# Uses MeSH explosions where possible (broad MeSH terms auto-include narrower
-# descendants in PubMed). [tiab] terms catch concepts not yet well-indexed.
 
 TOPICS = {
     "Ocular Oncology (excluding retinoblastoma)": (
@@ -175,7 +168,7 @@ TOPICS = {
 }
 
 DAYS_BACK             = 7
-MAX_PAPERS_PER_TOPIC  = 25
+MAX_PAPERS_PER_TOPIC  = 40
 GROQ_MODEL            = "meta-llama/llama-4-scout-17b-16e-instruct"
 SECONDS_BETWEEN_CALLS = 2
 WORDS_ABSTRACT_ONLY   = 300
@@ -192,13 +185,46 @@ MAX_EPISODES_TO_KEEP  = 12
 groq = Groq(api_key=GROQ_API_KEY)
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
+# ---------- NCBI rate-limited fetcher ----------
+
+_NCBI_LAST_CALL = 0.0
+NCBI_MIN_INTERVAL = 0.12 if NCBI_API_KEY else 0.4   # seconds between any two NCBI calls
+
+
+def _ncbi_get(endpoint, params, timeout=60, retries=4):
+    """Throttled GET to an NCBI E-utilities endpoint, with retry on 429."""
+    global _NCBI_LAST_CALL
+
+    if NCBI_API_KEY:
+        params = {**params, "api_key": NCBI_API_KEY}
+    params = {**params, "tool": "pubmed-weekly-digest"}
+
+    for attempt in range(retries):
+        elapsed = time.monotonic() - _NCBI_LAST_CALL
+        if elapsed < NCBI_MIN_INTERVAL:
+            time.sleep(NCBI_MIN_INTERVAL - elapsed)
+        _NCBI_LAST_CALL = time.monotonic()
+
+        r = requests.get(f"{NCBI_BASE}/{endpoint}", params=params, timeout=timeout)
+        if r.status_code == 429:
+            wait = 5 * (attempt + 1)
+            print(f"    NCBI 429 (rate-limited). Backing off {wait}s...")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r
+
+    r.raise_for_status()
+    return r
+
+
+# ---------- PubMed ----------
 
 def search_pubmed(query, days_back, max_results):
     params = {"db": "pubmed", "term": query, "retmax": max_results,
               "retmode": "json", "reldate": days_back,
               "datetype": "pdat", "sort": "date"}
-    r = requests.get(f"{NCBI_BASE}/esearch.fcgi", params=params, timeout=30)
-    r.raise_for_status()
+    r = _ncbi_get("esearch.fcgi", params, timeout=30)
     return r.json()["esearchresult"].get("idlist", [])
 
 
@@ -206,8 +232,7 @@ def fetch_abstracts(pmids):
     if not pmids: return []
     params = {"db": "pubmed", "id": ",".join(pmids),
               "rettype": "abstract", "retmode": "xml"}
-    r = requests.get(f"{NCBI_BASE}/efetch.fcgi", params=params, timeout=60)
-    r.raise_for_status()
+    r = _ncbi_get("efetch.fcgi", params)
     root = ET.fromstring(r.text)
 
     papers = []
@@ -257,8 +282,7 @@ def fetch_pmc_full_text(pmcid, max_chars=12000):
     if not pmcid: return None
     try:
         params = {"db": "pmc", "id": pmcid.replace("PMC", ""), "rettype": "xml"}
-        r = requests.get(f"{NCBI_BASE}/efetch.fcgi", params=params, timeout=60)
-        r.raise_for_status()
+        r = _ncbi_get("efetch.fcgi", params)
         root = ET.fromstring(r.text)
         body = root.find(".//body")
         if body is None: return None
@@ -288,6 +312,8 @@ def fetch_pmc_full_text(pmcid, max_chars=12000):
     except Exception:
         return None
 
+
+# ---------- Summarization ----------
 
 def summarize_paper(paper, retries=3):
     has_ft = bool(paper.get("full_text"))
@@ -552,6 +578,10 @@ def send_email(html_body, subject, to_addr, gmail_user, gmail_pass):
 os.makedirs(EPISODES_DIR, exist_ok=True)
 date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 print(f"PubMed Weekly Digest — {date_str}\n" + "=" * 60)
+if NCBI_API_KEY:
+    print("Using NCBI API key (10 req/sec limit).")
+else:
+    print("No NCBI_API_KEY set. Throttling to 2.5 req/sec to stay safe.")
 
 print("\n[1/5] Searching PubMed...")
 all_papers = {}
@@ -559,7 +589,6 @@ for topic, query in TOPICS.items():
     pmids = search_pubmed(query, DAYS_BACK, MAX_PAPERS_PER_TOPIC)
     all_papers[topic] = fetch_abstracts(pmids)
     print(f"  {topic}: {len(all_papers[topic])} papers")
-    time.sleep(0.5)
 total = sum(len(p) for p in all_papers.values())
 
 print("\n[2/5] Fetching open-access full text from PMC...")
@@ -568,7 +597,6 @@ for papers in all_papers.values():
     for p in papers:
         p["full_text"] = fetch_pmc_full_text(p["pmcid"]) if p["pmcid"] else None
         if p["full_text"]: oa += 1
-        time.sleep(0.3)
 print(f"  Full text obtained for {oa}/{total}")
 
 print("\n[3/5] Sending email digest (titles + abstracts)...")
