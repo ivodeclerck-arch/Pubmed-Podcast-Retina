@@ -1,25 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>PubMed Weekly Digest</title>
+    <title>PubMed Weekly Digest — Retina &amp; Ocular Oncology</title>
     <link>https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina</link>
     <atom:link href="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/feed.xml" rel="self" type="application/rss+xml"/>
-    <description>Weekly research updates in ocular oncology, vitreoretinal surgery, robotic eye surgery, and AI in retinal disease.</description>
+    <description>Weekly research updates in ocular oncology (excluding retinoblastoma), vitreoretinal surgery, ophthalmic surgical robotics, and AI applications in vitreoretinal surgery and ocular oncology.</description>
     <language>en-us</language>
-    <itunes:author>Your Name</itunes:author>
-    <itunes:summary>Weekly research updates in ocular oncology, vitreoretinal surgery, robotic eye surgery, and AI in retinal disease.</itunes:summary>
-    <itunes:category text="Health &amp; Fitness">
-      <itunes:category text="Medicine"/>
-    </itunes:category>
+    <itunes:author>Ivo De Clerck</itunes:author>
+    <itunes:summary>Weekly research updates in ocular oncology (excluding retinoblastoma), vitreoretinal surgery, ophthalmic surgical robotics, and AI applications in vitreoretinal surgery and ocular oncology.</itunes:summary>
+    <itunes:category text="Health &amp; Fitness"><itunes:category text="Medicine"/></itunes:category>
     <itunes:explicit>false</itunes:explicit>
     <itunes:image href="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/cover.jpg"/>
     <item>
       <title>Week of May 14, 2026</title>
       <description>Weekly PubMed update for May 14, 2026.</description>
       <pubDate>Thu, 14 May 2026 00:00:00 +0000</pubDate>
-      <enclosure url="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-05-14.mp3" length="16887657" type="audio/mpeg"/>
+      <enclosure url="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-05-14.mp3" length="40726986" type="audio/mpeg"/>
       <guid isPermaLink="true">https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-05-14.mp3</guid>
-      <itunes:duration>2811</itunes:duration>
+      <itunes:duration>6779</itunes:duration>
       <itunes:explicit>false</itunes:explicit>
     </item>
   </channel>
