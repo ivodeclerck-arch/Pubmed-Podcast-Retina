@@ -2,8 +2,8 @@
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>PubMed Weekly Digest</title>
-    <link>https://ivodeclerck-arch.github.io/pubmed-podcast-retina</link>
-    <atom:link href="https://ivodeclerck-arch.github.io/pubmed-podcast-retina/feed.xml" rel="self" type="application/rss+xml"/>
+    <link>https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina</link>
+    <atom:link href="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/feed.xml" rel="self" type="application/rss+xml"/>
     <description>Weekly research updates in ocular oncology, vitreoretinal surgery, robotic eye surgery, and AI in retinal disease.</description>
     <language>en-us</language>
     <itunes:author>Your Name</itunes:author>
@@ -12,14 +12,14 @@
       <itunes:category text="Medicine"/>
     </itunes:category>
     <itunes:explicit>false</itunes:explicit>
-    <itunes:image href="https://ivodeclerck-arch.github.io/pubmed-podcast-retina/cover.jpg"/>
+    <itunes:image href="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/cover.jpg"/>
     <item>
       <title>Week of May 14, 2026</title>
       <description>Weekly PubMed update for May 14, 2026.</description>
       <pubDate>Thu, 14 May 2026 00:00:00 +0000</pubDate>
-      <enclosure url="https://ivodeclerck-arch.github.io/pubmed-podcast-retina/episodes/2026-05-14.mp3" length="16959153" type="audio/mpeg"/>
-      <guid isPermaLink="true">https://ivodeclerck-arch.github.io/pubmed-podcast-retina/episodes/2026-05-14.mp3</guid>
-      <itunes:duration>2823</itunes:duration>
+      <enclosure url="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-05-14.mp3" length="16887657" type="audio/mpeg"/>
+      <guid isPermaLink="true">https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-05-14.mp3</guid>
+      <itunes:duration>2811</itunes:duration>
       <itunes:explicit>false</itunes:explicit>
     </item>
   </channel>
