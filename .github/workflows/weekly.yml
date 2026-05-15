@@ -25,6 +25,7 @@ jobs:
 
       - name: Run the digest script
         env:
+          PYTHONUNBUFFERED:   '1'
           GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
           NCBI_API_KEY:       ${{ secrets.NCBI_API_KEY }}
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
