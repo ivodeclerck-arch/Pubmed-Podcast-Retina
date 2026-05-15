@@ -3,3 +3,5 @@ edge-tts
 nest_asyncio
 requests
 mutagen
+pypdf
+trafilatura
