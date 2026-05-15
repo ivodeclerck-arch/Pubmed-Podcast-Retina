@@ -15,6 +15,7 @@ import html
 import smtplib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.utils import format_datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -51,6 +52,9 @@ PODCAST_DESCRIPTION = ("Weekly research updates in ocular oncology (excluding re
                        "vitreoretinal surgery, ophthalmic surgical robotics, and AI applications "
                        "in vitreoretinal surgery and ocular oncology.")
 PODCAST_AUTHOR      = "Ivo De Clerck"
+
+# Timezone used for episode filenames + display dates. Change if you move.
+LOCAL_TZ = ZoneInfo("Europe/Brussels")
 
 TOPICS = {
     "Ocular Oncology (excluding retinoblastoma)": (
@@ -490,7 +494,7 @@ def build_rss_feed(episodes_dir, output_path, base_url):
             if not fname.endswith(".mp3"): continue
             path = os.path.join(episodes_dir, fname)
             try:
-                ep_date = datetime.strptime(fname[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                ep_date = datetime.strptime(fname[:10], "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
             except ValueError:
                 continue
             size = os.path.getsize(path)
@@ -600,7 +604,7 @@ def send_email(html_body, subject, to_addr, gmail_user, gmail_pass):
 # ===================================================================
 
 os.makedirs(EPISODES_DIR, exist_ok=True)
-date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+date_str = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
 print(f"PubMed Weekly Digest — {date_str}\n" + "=" * 60)
 if NCBI_API_KEY:
     print("Using NCBI API key (10 req/sec limit).")
