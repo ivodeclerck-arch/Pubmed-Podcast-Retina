@@ -14,6 +14,7 @@ import re
 import html
 import smtplib
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from email.utils import format_datetime
@@ -26,6 +27,8 @@ import edge_tts
 import nest_asyncio
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, CHAP, CTOC, TIT2, CTOCFlags
+from pypdf import PdfReader
+import trafilatura
 
 nest_asyncio.apply()
 
@@ -38,6 +41,9 @@ NCBI_API_KEY        = os.environ.get("NCBI_API_KEY", "")   # optional but recomm
 GMAIL_USER          = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_TO            = os.environ.get("EMAIL_TO", "")
+# Unpaywall asks for a contact email (courtesy, not authentication).
+# Falls back to the Gmail user, then to a placeholder.
+UNPAYWALL_EMAIL     = os.environ.get("UNPAYWALL_EMAIL") or GMAIL_USER or "anonymous@example.com"
 
 OUTPUT_DIR    = os.environ.get("OUTPUT_DIR", ".")
 EPISODES_DIR  = os.path.join(OUTPUT_DIR, "episodes")
@@ -290,17 +296,21 @@ def fetch_abstracts(pmids):
                     first_affiliation = aff.text.strip()
 
         pmcid = ""
+        doi = ""
         for art_id in article.findall(".//ArticleId"):
-            if art_id.get("IdType") == "pmc":
+            id_type = art_id.get("IdType")
+            if id_type == "pmc":
                 pmcid = (art_id.text or "").strip()
-                break
+            elif id_type == "doi":
+                doi = (art_id.text or "").strip()
 
         papers.append({
             "pmid": pmid, "title": title, "abstract": abstract,
             "journal": journal, "authors": authors,
             "first_author": authors[0] if authors else "Unknown",
             "last_author": authors[-1] if len(authors) > 1 else "",
-            "affiliation": first_affiliation, "pmcid": pmcid,
+            "affiliation": first_affiliation,
+            "pmcid": pmcid, "doi": doi,
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
         })
     return papers
@@ -339,6 +349,124 @@ def fetch_pmc_full_text(pmcid, max_chars=12000):
         return combined or None
     except Exception:
         return None
+
+
+# ---------- Open access via Unpaywall ----------
+
+# A reasonable browser user agent. Some publishers refuse default Python User-Agent.
+WEB_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (compatible; PubMed-Weekly-Digest/1.0; "
+                   "+https://github.com/) Python/requests"),
+    "Accept": "application/pdf, text/html, application/xml; q=0.9, */*; q=0.8",
+}
+
+
+def find_oa_url_unpaywall(doi):
+    """Ask Unpaywall for the best open-access URL for this DOI.
+    Returns (url, kind) where kind is 'pdf' or 'html', or (None, None)."""
+    if not doi:
+        return None, None
+    try:
+        r = requests.get(
+            f"https://api.unpaywall.org/v2/{doi}",
+            params={"email": UNPAYWALL_EMAIL},
+            timeout=20,
+        )
+        if r.status_code == 404:
+            return None, None
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("is_oa"):
+            return None, None
+        best = data.get("best_oa_location") or {}
+        pdf_url = best.get("url_for_pdf")
+        if pdf_url:
+            return pdf_url, "pdf"
+        html_url = best.get("url")
+        if html_url:
+            return html_url, "html"
+        return None, None
+    except Exception:
+        return None, None
+
+
+def extract_pdf_text(pdf_bytes, max_chars):
+    """Extract text from PDF bytes via pypdf."""
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        parts = []
+        for page in reader.pages:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                continue
+        text = " ".join(parts)
+        text = " ".join(text.split())
+        # Drop everything after the references section if we can detect it
+        for marker in [" References ", " REFERENCES ", " Bibliography ", " BIBLIOGRAPHY "]:
+            idx = text.rfind(marker)
+            if idx > len(text) * 0.5:   # only trim if marker is in latter half
+                text = text[:idx]
+                break
+        if len(text) > max_chars:
+            text = text[:max_chars] + "... [truncated]"
+        return text if text.strip() else None
+    except Exception:
+        return None
+
+
+def extract_html_text(html_str, max_chars):
+    """Extract main article body from HTML via trafilatura."""
+    try:
+        text = trafilatura.extract(
+            html_str,
+            include_comments=False,
+            include_tables=False,
+            favor_recall=True,
+        )
+        if not text:
+            return None
+        text = " ".join(text.split())
+        if len(text) > max_chars:
+            text = text[:max_chars] + "... [truncated]"
+        return text
+    except Exception:
+        return None
+
+
+def fetch_from_publisher(url, kind, max_chars=12000):
+    """Download a paper from a publisher URL and extract its text.
+    `kind` is 'pdf' or 'html' (hint from Unpaywall; we re-check content-type)."""
+    if not url:
+        return None
+    try:
+        r = requests.get(url, headers=WEB_HEADERS, timeout=30, allow_redirects=True)
+        r.raise_for_status()
+        ctype = r.headers.get("content-type", "").lower()
+        is_pdf = "pdf" in ctype or url.lower().endswith(".pdf")
+        if is_pdf:
+            return extract_pdf_text(r.content, max_chars)
+        return extract_html_text(r.text, max_chars)
+    except Exception:
+        return None
+
+
+def get_open_access_text(paper, max_chars=12000):
+    """Try multiple sources for full text. Returns (text, source) or (None, None).
+    Source order: PMC (structured XML) → publisher PDF → publisher HTML."""
+    # 1. PMC first — best quality, structured sections
+    if paper.get("pmcid"):
+        text = fetch_pmc_full_text(paper["pmcid"], max_chars=max_chars)
+        if text:
+            return text, "pmc"
+    # 2. Unpaywall via DOI → publisher site
+    if paper.get("doi"):
+        oa_url, kind = find_oa_url_unpaywall(paper["doi"])
+        if oa_url:
+            text = fetch_from_publisher(oa_url, kind, max_chars=max_chars)
+            if text:
+                return text, f"unpaywall-{kind}"
+    return None, None
 
 
 # ---------- Summarization ----------
@@ -624,13 +752,21 @@ for topic, query in TOPICS.items():
     print(f"  {topic}: {len(all_papers[topic])} papers{dup_note}")
 total = sum(len(p) for p in all_papers.values())
 
-print("\n[2/5] Fetching open-access full text from PMC...")
+print("\n[2/5] Fetching open-access full text (PMC + Unpaywall)...")
 oa = 0
+src_counts = {"pmc": 0, "unpaywall-pdf": 0, "unpaywall-html": 0}
 for papers in all_papers.values():
     for p in papers:
-        p["full_text"] = fetch_pmc_full_text(p["pmcid"]) if p["pmcid"] else None
-        if p["full_text"]: oa += 1
+        text, source = get_open_access_text(p)
+        p["full_text"] = text
+        p["full_text_source"] = source
+        if text:
+            oa += 1
+            src_counts[source] = src_counts.get(source, 0) + 1
 print(f"  Full text obtained for {oa}/{total}")
+print(f"    PMC: {src_counts.get('pmc', 0)}  "
+      f"Publisher PDF: {src_counts.get('unpaywall-pdf', 0)}  "
+      f"Publisher HTML: {src_counts.get('unpaywall-html', 0)}")
 
 print("\n[3/5] Sending email digest (titles + abstracts)...")
 email_html = build_html_email(all_papers, date_str, oa, total)
