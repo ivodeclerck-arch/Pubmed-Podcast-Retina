@@ -12,6 +12,15 @@
     <itunes:explicit>false</itunes:explicit>
     <itunes:image href="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/cover.jpg"/>
     <item>
+      <title>Week of June 15, 2026</title>
+      <description>Weekly PubMed update for June 15, 2026.</description>
+      <pubDate>Mon, 15 Jun 2026 00:00:00 +0200</pubDate>
+      <enclosure url="https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-06-15.mp3" length="26612844" type="audio/mpeg"/>
+      <guid isPermaLink="true">https://ivodeclerck-arch.github.io/Pubmed-Podcast-Retina/episodes/2026-06-15.mp3</guid>
+      <itunes:duration>4430</itunes:duration>
+      <itunes:explicit>false</itunes:explicit>
+    </item>
+    <item>
       <title>Week of June 08, 2026</title>
       <description>Weekly PubMed update for June 08, 2026.</description>
       <pubDate>Mon, 08 Jun 2026 00:00:00 +0200</pubDate>
