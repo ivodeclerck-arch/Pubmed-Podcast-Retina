@@ -559,21 +559,173 @@ def fetch_from_publisher(url, kind, max_chars=12000):
         return None
 
 
+# ---------- Europe PMC (broader OA full-text corpus than NCBI PMC) ----------
+
+def _sectionize_jats(root, max_chars):
+    """Extract Results/Discussion-weighted text from a JATS-XML <body>."""
+    body = root.find(".//body")
+    if body is None:
+        return None
+    keywords = ["result", "discussion", "conclusion", "finding", "implication"]
+    priority, other = [], []
+    for sec in body.findall(".//sec"):
+        title_elem = sec.find("./title")
+        title = (title_elem.text or "").lower() if title_elem is not None else ""
+        text = " ".join(" ".join(sec.itertext()).split())
+        if not text:
+            continue
+        if any(k in title for k in keywords):
+            priority.append(text)
+        else:
+            other.append(text)
+    if not priority:
+        combined = " ".join(other)
+    elif sum(len(t) for t in priority) < 1500:
+        combined = " ".join(priority + other)
+    else:
+        combined = " ".join(priority)
+    combined = " ".join(combined.split())
+    if not combined:
+        return None
+    if len(combined) > max_chars:
+        combined = combined[:max_chars] + "... [truncated]"
+    return combined
+
+
+def fetch_europepmc_full_text(paper, max_chars=12000):
+    """Europe PMC hosts full-text XML for a wider OA set than NCBI PMC,
+    including many author manuscripts. Tries by PMCID, then by DOI lookup."""
+    pmcid = paper.get("pmcid")
+    try:
+        # If no PMCID, ask Europe PMC's search API whether it has full text.
+        if not pmcid and paper.get("doi"):
+            q = requests.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": f'DOI:"{paper["doi"]}"', "format": "json",
+                        "resultType": "core"},
+                headers=WEB_HEADERS, timeout=20,
+            )
+            q.raise_for_status()
+            results = q.json().get("resultList", {}).get("result", [])
+            for res in results:
+                if res.get("hasTextMinedTerms") or res.get("inEPMC") == "Y":
+                    pmcid = res.get("pmcid") or pmcid
+                    break
+        if not pmcid:
+            return None
+
+        clean = pmcid if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
+        r = requests.get(
+            f"https://www.ebi.ac.uk/europepmc/webservices/rest/{clean}/fullTextXML",
+            headers=WEB_HEADERS, timeout=30,
+        )
+        if r.status_code != 200 or not r.text.strip():
+            return None
+        root = ET.fromstring(r.text)
+        return _sectionize_jats(root, max_chars)
+    except Exception:
+        return None
+
+
+# ---------- Preprint servers (bioRxiv / medRxiv) ----------
+
+def fetch_preprint_full_text(doi, max_chars=12000):
+    """If the DOI is a bioRxiv/medRxiv preprint, fetch its full-text HTML."""
+    if not doi:
+        return None
+    doi_l = doi.lower()
+    # bioRxiv/medRxiv DOIs look like 10.1101/2025.01.15.xxxxxx
+    if "10.1101/" not in doi_l:
+        return None
+    try:
+        # The .full.pdf and HTML versions live under the doi.org redirect.
+        # Try the HTML full text first (cleaner extraction via trafilatura).
+        for suffix in (".full", ""):
+            url = f"https://www.biorxiv.org/content/{doi}{suffix}"
+            r = requests.get(url, headers=WEB_HEADERS, timeout=30, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 2000:
+                text = extract_html_text(r.text, max_chars)
+                if text:
+                    return text
+        # medRxiv mirror
+        url = f"https://www.medrxiv.org/content/{doi}.full"
+        r = requests.get(url, headers=WEB_HEADERS, timeout=30, allow_redirects=True)
+        if r.status_code == 200:
+            return extract_html_text(r.text, max_chars)
+    except Exception:
+        return None
+    return None
+
+
+# ---------- Semantic Scholar (open-access PDF fallback) ----------
+
+def fetch_semanticscholar_oa(doi, max_chars=12000):
+    """Semantic Scholar often knows an openAccessPdf URL even when Unpaywall
+    doesn't. Free, no key required (rate-limited but fine for weekly use)."""
+    if not doi:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
+            params={"fields": "openAccessPdf,isOpenAccess"},
+            headers=WEB_HEADERS, timeout=20,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        oa = data.get("openAccessPdf") or {}
+        pdf_url = oa.get("url")
+        if not pdf_url:
+            return None
+        return fetch_from_publisher(pdf_url, "pdf", max_chars=max_chars)
+    except Exception:
+        return None
+
+
 def get_open_access_text(paper, max_chars=12000):
-    """Try multiple sources for full text. Returns (text, source) or (None, None).
-    Source order: PMC (structured XML) → publisher PDF → publisher HTML."""
-    # 1. PMC first — best quality, structured sections
+    """Try multiple sources for full text, best-quality first.
+    Returns (text, source) or (None, None).
+
+    Order:
+      1. NCBI PMC          — structured JATS XML, cleanest
+      2. Europe PMC        — broader OA corpus incl. author manuscripts
+      3. Preprint server   — bioRxiv / medRxiv full text
+      4. Unpaywall         — publisher OA PDF or HTML
+      5. Semantic Scholar  — openAccessPdf fallback
+    """
+    doi = paper.get("doi")
+
+    # 1. NCBI PMC
     if paper.get("pmcid"):
         text = fetch_pmc_full_text(paper["pmcid"], max_chars=max_chars)
         if text:
             return text, "pmc"
-    # 2. Unpaywall via DOI → publisher site
-    if paper.get("doi"):
-        oa_url, kind = find_oa_url_unpaywall(paper["doi"])
+
+    # 2. Europe PMC (by PMCID or DOI)
+    text = fetch_europepmc_full_text(paper, max_chars=max_chars)
+    if text:
+        return text, "europepmc"
+
+    # 3. Preprint servers
+    if doi:
+        text = fetch_preprint_full_text(doi, max_chars=max_chars)
+        if text:
+            return text, "preprint"
+
+    # 4. Unpaywall → publisher site
+    if doi:
+        oa_url, kind = find_oa_url_unpaywall(doi)
         if oa_url:
             text = fetch_from_publisher(oa_url, kind, max_chars=max_chars)
             if text:
                 return text, f"unpaywall-{kind}"
+
+    # 5. Semantic Scholar openAccessPdf
+    if doi:
+        text = fetch_semanticscholar_oa(doi, max_chars=max_chars)
+        if text:
+            return text, "semanticscholar"
+
     return None, None
 
 
@@ -921,9 +1073,9 @@ for topic, query in TOPICS.items():
     print(f"  {topic}: {len(kept)} papers{note_str}")
 total = sum(len(p) for p in all_papers.values())
 
-print("\n[2/5] Fetching open-access full text (PMC + Unpaywall)...")
+print("\n[2/5] Fetching open-access full text (PMC, Europe PMC, preprints, Unpaywall, S2)...")
 oa = 0
-src_counts = {"pmc": 0, "unpaywall-pdf": 0, "unpaywall-html": 0}
+src_counts = {}
 for papers in all_papers.values():
     for p in papers:
         text, source = get_open_access_text(p)
@@ -933,9 +1085,9 @@ for papers in all_papers.values():
             oa += 1
             src_counts[source] = src_counts.get(source, 0) + 1
 print(f"  Full text obtained for {oa}/{total}")
-print(f"    PMC: {src_counts.get('pmc', 0)}  "
-      f"Publisher PDF: {src_counts.get('unpaywall-pdf', 0)}  "
-      f"Publisher HTML: {src_counts.get('unpaywall-html', 0)}")
+if src_counts:
+    breakdown = "  ".join(f"{k}: {v}" for k, v in sorted(src_counts.items()))
+    print(f"    {breakdown}")
 
 print("\n[3/5] Sending email digest (titles + abstracts)...")
 email_html = build_html_email(all_papers, date_str, oa, total)
@@ -959,13 +1111,13 @@ print("\n[5/5] Building chaptered audio + RSS feed...")
 def source_phrase(paper):
     """Spoken note about what the summary was based on."""
     src = paper.get("full_text_source")
-    if src == "pmc":
+    if src in ("pmc", "europepmc"):
         return "Based on the full text."
-    if src == "unpaywall-pdf":
+    if src in ("unpaywall-pdf", "unpaywall-html", "semanticscholar"):
         return "Based on the full text from the publisher."
-    if src == "unpaywall-html":
-        return "Based on the full text from the publisher."
-    # No full text — distinguish preprints from abstract-only by journal hint
+    if src == "preprint":
+        return "Based on the full preprint."
+    # No full text retrieved
     journal = (paper.get("journal") or "").lower()
     if "biorxiv" in journal or "medrxiv" in journal or "preprint" in journal:
         return "Based on the preprint abstract only."
