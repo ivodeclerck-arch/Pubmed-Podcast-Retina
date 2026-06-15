@@ -180,10 +180,11 @@ MAX_PAPERS_PER_TOPIC  = 25
 GROQ_MODEL            = "meta-llama/llama-4-scout-17b-16e-instruct"
 SECONDS_BETWEEN_CALLS = 2
 WORDS_ABSTRACT_ONLY   = 300
-WORDS_FULL_TEXT       = 450
+WORDS_FULL_TEXT       = 550
 TTS_VOICE             = "en-US-AndrewNeural"
 TTS_RATE              = "+0%"
 TTS_PARALLELISM       = 10
+GAP_BETWEEN_PAPERS    = 10        # seconds of silence after each paper
 MAX_EPISODES_TO_KEEP  = 12
 
 # ===================================================================
@@ -254,12 +255,110 @@ EXCLUDED_PUB_TYPES = (
 
 
 def search_pubmed(query, days_back, max_results):
-    full_query = f"({query}) NOT ({EXCLUDED_PUB_TYPES})"
+    full_query = f"({query}) AND English[lang] NOT ({EXCLUDED_PUB_TYPES})"
     params = {"db": "pubmed", "term": full_query, "retmax": max_results,
               "retmode": "json", "reldate": days_back,
               "datetype": "pdat", "sort": "date"}
     r = _ncbi_get("esearch.fcgi", params, timeout=30)
     return r.json()["esearchresult"].get("idlist", [])
+
+
+# Title patterns marking reply/comment/case correspondence (case-insensitive).
+_REPLY_TITLE_PATTERNS = re.compile(
+    r"(^\s*re\s*[:.\-]|"             # leading "Re:" / "Re." / "Re-"
+    r"^\s*comment\b|"               # title starting with "Comment"
+    r"\bcomment on\b|"
+    r"\bin reply\b|"
+    r"\breply\b|"
+    r"\bin response to\b|"
+    r"\bresponse to\b.*\bregarding\b|"
+    r"\bletter to the editor\b|"
+    r"\bauthor'?s? repl|"
+    r"\bcase report\b|"
+    r"\bcase series\b|"
+    r"\ba case of\b|"
+    r"\breport of a case\b|"
+    r"\b3-?dimensional (operative |surgical )?video\b|"
+    r"\boperative video\b)",
+    re.IGNORECASE,
+)
+
+# Publication types (record-level) that we never want.
+_BAD_PUB_TYPES = {
+    "case reports", "comment", "editorial", "letter", "published erratum",
+    "retraction of publication", "retracted publication", "duplicate publication",
+    "video-audio media", "news", "biography", "autobiography",
+    "historical article", "congress", "consensus development conference",
+}
+
+# Journal-name fragments that indicate case-report-only venues.
+_CASE_REPORT_JOURNALS = (
+    "case report", "case reports", "brief reports", "retinal cases",
+    "case rep", "bmj case", "clinical case",
+)
+
+# Abstract opening phrases that betray a case report even when not labelled.
+_CASE_ABSTRACT_PATTERNS = re.compile(
+    r"(\bwe (here(in|by) )?(present|report|describe) (a|an|the|one|two|three) "
+    r"(rare |unusual |unique |novel |case)|"
+    r"\bwe (present|report|describe) a case\b|"
+    r"\bto (the best of our knowledge,? )?this is the first (reported )?case\b|"
+    r"\ba \d+[- ]year[- ]old (man|woman|male|female|boy|girl|patient)\b|"
+    r"\bwe describe (a|an|the) (patient|case)\b|"
+    r"\bthis (case )?report\b)",
+    re.IGNORECASE,
+)
+
+# Languages we accept (ISO 639-2 codes used by PubMed).
+ACCEPTED_LANGUAGES = {"eng"}
+
+
+def passes_quality_filter(paper, min_abstract_words=100):
+    """Return (ok, reason). Drops case reports, comments, replies, non-English,
+    and papers with missing or thin abstracts — using multiple signals."""
+    title = paper.get("title", "")
+
+    # 1. Title patterns (reply/comment/case/video)
+    if _REPLY_TITLE_PATTERNS.search(title):
+        return False, "reply/comment/case title"
+
+    # 2. Record-level publication types
+    pub_types = set(paper.get("pub_types", []))
+    bad = pub_types & _BAD_PUB_TYPES
+    if bad:
+        return False, f"pub type: {', '.join(sorted(bad))}"
+
+    # 3. Language (must include English; default-accept if field missing)
+    languages = paper.get("languages", [])
+    if languages and not (set(languages) & ACCEPTED_LANGUAGES):
+        return False, f"language: {', '.join(languages)}"
+
+    # 4. Case-report-only journals
+    journal_l = (paper.get("journal") or "").lower()
+    if any(frag in journal_l for frag in _CASE_REPORT_JOURNALS):
+        return False, "case-report journal"
+
+    # 5. Abstract presence and length
+    abstract = (paper.get("abstract", "") or "").strip()
+    if abstract in ("", "(No abstract available.)"):
+        return False, "no abstract"
+    if len(abstract.split()) < min_abstract_words:
+        return False, f"abstract under {min_abstract_words} words"
+
+    # 6. Case-report-style abstract opening (only flag if it also lacks
+    #    study-design language, to avoid dropping real cohort studies that
+    #    happen to mention a representative patient)
+    if _CASE_ABSTRACT_PATTERNS.search(abstract):
+        cohort_signals = re.search(
+            r"\b(cohort|retrospective|prospective|randomi[sz]ed|consecutive "
+            r"(patients|eyes|cases)|n\s*=\s*\d{2,}|\d{2,}\s*(patients|eyes|"
+            r"participants)|case series of \d+|multicent)",
+            abstract, re.IGNORECASE,
+        )
+        if not cohort_signals:
+            return False, "case-report abstract style"
+
+    return True, ""
 
 
 def fetch_abstracts(pmids):
@@ -304,6 +403,14 @@ def fetch_abstracts(pmids):
             elif id_type == "doi":
                 doi = (art_id.text or "").strip()
 
+        # Languages (e.g. "eng", "fre", "ger"). Usually one.
+        languages = [l.text.strip().lower() for l in article.findall(".//Language") if l.text]
+
+        # Publication types declared in the record itself — more complete than
+        # the search-time [pt] filter for very recent papers.
+        pub_types = [pt.text.strip().lower()
+                     for pt in article.findall(".//PublicationType") if pt.text]
+
         papers.append({
             "pmid": pmid, "title": title, "abstract": abstract,
             "journal": journal, "authors": authors,
@@ -311,6 +418,7 @@ def fetch_abstracts(pmids):
             "last_author": authors[-1] if len(authors) > 1 else "",
             "affiliation": first_affiliation,
             "pmcid": pmcid, "doi": doi,
+            "languages": languages, "pub_types": pub_types,
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
         })
     return papers
@@ -481,10 +589,14 @@ def summarize_paper(paper, retries=3):
     if has_ft:
         content_block = (f"Abstract:\n{paper['abstract']}\n\n"
                          f"Selected full-text content (Results / Discussion / Conclusion):\n{paper['full_text']}")
-        length_rule = (f"Aim for {target_words} words (acceptable range 400–500). "
-                       "Since you have the full-text Results and Discussion, weight the segment toward "
-                       "specific findings, effect magnitudes, and the authors' interpretation. Cover the "
-                       "study design briefly; spend most of the segment on results and their meaning.")
+        length_rule = (f"Aim for {target_words} words (acceptable range 450–600). "
+                       "You have the full-text Results and Discussion. Produce a DEEP review: go well "
+                       "beyond the abstract. Report the primary and secondary outcomes individually with "
+                       "their numeric values, describe subgroup or secondary analyses, and devote a "
+                       "substantial portion of the segment to the Discussion — how the authors interpret "
+                       "their findings, how the results compare to prior work they cite, what mechanisms "
+                       "they propose, and every limitation they acknowledge. Cover study design briefly; "
+                       "spend most of the segment on results and their interpretation.")
     else:
         content_block = f"Abstract:\n{paper['abstract']}"
         length_rule = (f"Aim for {target_words} words. Use all information present in the abstract. "
@@ -502,9 +614,13 @@ MUST INCLUDE, EVERY TIME, NEAR THE START:
 REQUIRED CONTENT:
 - Specific study aim or hypothesis.
 - Design and population / cohort / sample (sizes, follow-up duration, multicentric vs single-centre, retrospective vs prospective, etc.).
-- Key results with concrete numbers — effect sizes, anatomical success rates, visual acuity changes in logMAR or letters, AUCs, hazard ratios. Skip p-values and confidence intervals.
+- Key results with concrete numbers — effect sizes, anatomical success rates, visual acuity changes in logMAR or letters, AUCs, hazard ratios, tumor dimensions, radiation doses.
 - Authors' stated interpretation.
 - Limitations the authors note.
+
+HANDLING NUMBERS (important for listenability):
+- Report central values (means, medians, proportions, rates) but DO NOT read out standard deviations, interquartile ranges, or confidence intervals — they make spoken audio hard to follow. For example, say "mean tumor thickness was 4.2 millimeters" not "4.2 plus or minus 1.1 millimeters".
+- DO NOT read p-values aloud. Instead, state whether a result was statistically significant or not. For example, instead of "p equals 0.03" say "a statistically significant difference"; instead of "p equals 0.21" say "the difference was not statistically significant". Use the p < 0.05 threshold to decide.
 
 DO NOT INCLUDE:
 - Generic background such as "AMD is a leading cause of blindness", "OCT is widely used in retinal imaging", "vitrectomy is a common procedure". The listener already knows.
@@ -516,7 +632,19 @@ DO NOT INCLUDE:
 STYLE:
 - Scientific spoken English at medical PhD level. Direct, precise, no fluff.
 - No bullet points, no markdown, no headings.
-- Pronounce acronyms phonetically: OCT as "O C T", AMD as "A M D", anti-VEGF as "anti veg eff", IVT as "I V T", BCVA as "B C V A", RPE as "R P E", PVR as "P V R", ILM as "I L M", PPV as "P P V", AUC as "A U C", DR as "D R".
+- ABBREVIATIONS: When a paper introduces an abbreviation (e.g., "best-corrected visual acuity (BCVA)"), keep using the FULL spoken term throughout your segment — do not switch to the abbreviation. Say "best-corrected visual acuity" each time, not "B C V A". This applies to all study-specific abbreviations the paper defines.
+- For unavoidable standing acronyms, pronounce phonetically: OCT as "O C T", AMD as "A M D", anti-VEGF as "anti veg eff", RPE as "R P E", PVR as "P V R", ILM as "I L M", PPV as "P P V", AUC as "A U C", DR as "D R".
+- UNITS AND ISOTOPES — write these so a text-to-speech engine pronounces them correctly:
+    * "mm" → "millimeters"
+    * "mm2" or "mm²" → "square millimeters"
+    * "cm" → "centimeters";  "μm" or "um" → "micrometers"
+    * "I-125" / "I125" / "¹²⁵I" (iodine-125 brachytherapy) → "iodine one twenty-five"
+    * "Ru-106" / "Ru106" / "¹⁰⁶Ru" → "ruthenium one oh six"
+    * "Gy" → "gray";  "cGy" → "centigray";  "mGy" → "milligray"
+    * "mmHg" → "millimeters of mercury"
+    * "logMAR" → "log MAR"
+    * "kg" → "kilograms";  "mg" → "milligrams";  "mL" → "milliliters"
+    * Write any other unit out as the full spoken word rather than its symbol.
 - Begin directly with the paper. No "moving on", no "next paper" — transitions are handled separately.
 
 PAPER DATA:
@@ -546,6 +674,21 @@ Journal: {paper['journal']}
 
 # ---------- Audio with chapter markers ----------
 
+# A pre-encoded silent MP3 frame matching edge-tts output format
+# (MPEG-2 Layer III, 24kHz, 48kbps, mono — 144 bytes, ~24ms).
+# edge-tts produces this exact format, so concatenation is seamless.
+_SILENT_FRAME = bytes.fromhex(
+    "fff364c0" + "00" * 140
+)
+_SILENT_FRAME_MS = 576 / 24000.0 * 1000   # 24 ms per frame
+
+
+def make_silence(seconds):
+    """Return MP3 bytes of roughly `seconds` of silence (edge-tts format)."""
+    n_frames = max(1, int((seconds * 1000) / _SILENT_FRAME_MS))
+    return _SILENT_FRAME * n_frames
+
+
 async def _gen_audio(idx, title, text, voice, rate, semaphore):
     async with semaphore:
         data = b""
@@ -557,11 +700,14 @@ async def _gen_audio(idx, title, text, voice, rate, semaphore):
 
 
 async def build_chaptered_mp3_async(segments, output_path, voice, rate, parallelism):
+    """segments: list of (chapter_title, text, trailing_gap_seconds)."""
     sem = asyncio.Semaphore(parallelism)
-    tasks = [_gen_audio(i, t, x, voice, rate, sem)
-             for i, (t, x) in enumerate(segments)]
+    tasks = [_gen_audio(i, seg[0], seg[1], voice, rate, sem)
+             for i, seg in enumerate(segments)]
     results = await asyncio.gather(*tasks)
     results.sort(key=lambda r: r[0])
+
+    gaps = [seg[2] if len(seg) > 2 else 0 for seg in segments]
 
     durations_ms = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -570,15 +716,20 @@ async def build_chaptered_mp3_async(segments, output_path, voice, rate, parallel
             with open(p, "wb") as f: f.write(data)
             durations_ms.append(int(MP3(p).info.length * 1000))
 
+    # Write speech + trailing silence per segment
     with open(output_path, "wb") as f:
-        for _, _, data in results:
+        for i, (_, _, data) in enumerate(results):
             f.write(data)
+            if gaps[i] > 0:
+                f.write(make_silence(gaps[i]))
 
+    # Chapter boundaries account for the added silence
     chapters = []
     cumulative = 0
-    for (_, title, _), dur in zip(results, durations_ms):
-        chapters.append((title, cumulative, cumulative + dur))
-        cumulative += dur
+    for i, ((_, title, _), dur) in enumerate(zip(results, durations_ms)):
+        gap_ms = int(gaps[i] * 1000)
+        chapters.append((title, cumulative, cumulative + dur + gap_ms))
+        cumulative += dur + gap_ms
 
     audio = MP3(output_path, ID3=ID3)
     if audio.tags is None:
@@ -742,14 +893,32 @@ else:
 print("\n[1/5] Searching PubMed...")
 all_papers = {}
 seen_pmids = set()       # tracks PMIDs already assigned to an earlier topic
+filtered_total = 0
 for topic, query in TOPICS.items():
     pmids = search_pubmed(query, DAYS_BACK, MAX_PAPERS_PER_TOPIC)
     unique = [p for p in pmids if p not in seen_pmids]
     dups = len(pmids) - len(unique)
     seen_pmids.update(unique)
-    all_papers[topic] = fetch_abstracts(unique)
-    dup_note = f"  ({dups} duplicate{'s' if dups != 1 else ''} skipped)" if dups else ""
-    print(f"  {topic}: {len(all_papers[topic])} papers{dup_note}")
+
+    fetched = fetch_abstracts(unique)
+    kept = []
+    for p in fetched:
+        ok, reason = passes_quality_filter(p)
+        if ok:
+            kept.append(p)
+        else:
+            filtered_total += 1
+            print(f"      ✗ filtered ({reason}): {p['title'][:60]}")
+    all_papers[topic] = kept
+
+    notes = []
+    if dups:
+        notes.append(f"{dups} duplicate{'s' if dups != 1 else ''}")
+    dropped = len(fetched) - len(kept)
+    if dropped:
+        notes.append(f"{dropped} filtered")
+    note_str = f"  ({', '.join(notes)} skipped)" if notes else ""
+    print(f"  {topic}: {len(kept)} papers{note_str}")
 total = sum(len(p) for p in all_papers.values())
 
 print("\n[2/5] Fetching open-access full text (PMC + Unpaywall)...")
@@ -785,24 +954,46 @@ for topic, papers in all_papers.items():
         time.sleep(SECONDS_BETWEEN_CALLS)
 
 print("\n[5/5] Building chaptered audio + RSS feed...")
+
+
+def source_phrase(paper):
+    """Spoken note about what the summary was based on."""
+    src = paper.get("full_text_source")
+    if src == "pmc":
+        return "Based on the full text."
+    if src == "unpaywall-pdf":
+        return "Based on the full text from the publisher."
+    if src == "unpaywall-html":
+        return "Based on the full text from the publisher."
+    # No full text — distinguish preprints from abstract-only by journal hint
+    journal = (paper.get("journal") or "").lower()
+    if "biorxiv" in journal or "medrxiv" in journal or "preprint" in journal:
+        return "Based on the preprint abstract only."
+    return "Based on the abstract only."
+
+
 segments = [(
     "Welcome",
     f"Welcome to your PubMed update for {datetime.now().strftime('%B %d, %Y')}. "
     f"{total} new papers across {len(TOPICS)} areas, with full text for {oa}. "
-    f"Each paper is a separate chapter — skip ahead using your next-chapter control."
+    f"Each paper is a separate chapter — skip ahead using your next-chapter control.",
+    2,
 )]
 for topic, papers in all_papers.items():
     if not papers:
         segments.append((f"{topic} (none)",
-                         f"No new papers this week in {topic}."))
+                         f"No new papers this week in {topic}.", 2))
         continue
     segments.append((f"Topic: {topic}",
-                     f"Now turning to {topic}. {len(papers)} papers."))
+                     f"Now turning to {topic}. {len(papers)} papers.", 1))
     for p in papers:
-        segments.append((short_title(p["title"]), p["summary"]))
+        # Prepend a short spoken source note to each paper's summary.
+        body = f"{source_phrase(p)} {p['summary']}"
+        segments.append((short_title(p["title"]), body, GAP_BETWEEN_PAPERS))
 segments.append((
     "Wrap-up",
-    "That concludes this week's update. Drive safely."
+    "That concludes this week's update. Drive safely.",
+    0,
 ))
 
 audio_path = os.path.join(EPISODES_DIR, f"{date_str}.mp3")
